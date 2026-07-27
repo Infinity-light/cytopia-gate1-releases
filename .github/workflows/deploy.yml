@@ -103,6 +103,8 @@ jobs:
           password: ${{ secrets.SERVER_PASSWORD }}
           source: image.tar.gz
           target: /tmp
+          timeout: 120s
+          command_timeout: 10m
 
       - name: Deploy with backup and rollback
         uses: appleboy/ssh-action@v1

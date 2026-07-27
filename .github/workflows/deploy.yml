@@ -20,6 +20,7 @@ concurrency:
 
 permissions:
   contents: read
+  packages: write
 
 jobs:
   test-build-deploy:
@@ -29,6 +30,7 @@ jobs:
       SOURCE_REPO: ${{ github.event.client_payload.repo || inputs.repo || 'Infinity-light/cytopia-gate1' }}
       SOURCE_REF: ${{ github.event.client_payload.ref || inputs.ref || 'main' }}
       EXPECTED_SOURCE_SHA: ${{ github.event.client_payload.source_sha || '' }}
+      IMAGE_NAME: ghcr.io/infinity-light/cytopia-gate1-deploy
     steps:
       - name: Check out private source
         uses: actions/checkout@v4
@@ -91,43 +93,22 @@ jobs:
           done
           docker rm -f cytopia-smoke
 
-      - name: Package image
-        run: docker save "cytopia-gate1:$SOURCE_SHA" | gzip > image.tar.gz
-
-      - name: Transfer image
-        shell: bash
+      - name: Publish image to GHCR
         env:
-          SERVER_HOST: ${{ secrets.SERVER_HOST }}
-          SERVER_USER: ${{ secrets.SERVER_USER }}
-          SERVER_PORT: ${{ secrets.SERVER_PORT || '22' }}
-          SERVER_PASSWORD: ${{ secrets.SERVER_PASSWORD }}
+          REGISTRY_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          command -v sshpass >/dev/null || {
-            sudo apt-get update
-            sudo apt-get install -y sshpass
-          }
-          transferred=0
-          for attempt in 1 2 3; do
-            if sshpass -p "$SERVER_PASSWORD" scp \
-              -P "$SERVER_PORT" \
-              -o ConnectTimeout=180 \
-              -o ConnectionAttempts=2 \
-              -o ServerAliveInterval=30 \
-              -o ServerAliveCountMax=20 \
-              -o StrictHostKeyChecking=accept-new \
-              image.tar.gz "$SERVER_USER@$SERVER_HOST:/tmp/image.tar.gz"; then
-              transferred=1
-              break
-            fi
-            echo "Image transfer attempt $attempt failed"
-            sleep 10
-          done
-          [ "$transferred" = 1 ]
+          printf '%s' "$REGISTRY_TOKEN" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
+          docker tag "cytopia-gate1:$SOURCE_SHA" "$IMAGE_NAME:$SOURCE_SHA"
+          docker push "$IMAGE_NAME:$SOURCE_SHA"
+          docker logout ghcr.io
 
       - name: Deploy with backup and rollback
         uses: appleboy/ssh-action@v1
         env:
           SOURCE_SHA: ${{ env.SOURCE_SHA }}
+          IMAGE_NAME: ${{ env.IMAGE_NAME }}
+          REGISTRY_USER: ${{ github.actor }}
+          REGISTRY_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
           host: ${{ secrets.SERVER_HOST }}
           username: ${{ secrets.SERVER_USER }}
@@ -135,15 +116,25 @@ jobs:
           password: ${{ secrets.SERVER_PASSWORD }}
           timeout: 300s
           command_timeout: 25m
-          envs: SOURCE_SHA
+          envs: SOURCE_SHA,IMAGE_NAME,REGISTRY_USER,REGISTRY_TOKEN
           script: |
             set -eu
             APP=/opt/apps/cytopia-gate1
             mkdir -p "$APP/data" "$APP/uploads" "$APP/backups"
             chown -R 10001:10001 "$APP/data" "$APP/uploads"
-            docker load < /tmp/image.tar.gz
-            rm -f /tmp/image.tar.gz
-            docker tag "cytopia-gate1:$SOURCE_SHA" cytopia-gate1:candidate
+            registry_config=$(mktemp -d)
+            export DOCKER_CONFIG="$registry_config"
+            cleanup_registry() {
+              docker logout ghcr.io >/dev/null 2>&1 || true
+              rm -rf "$registry_config"
+            }
+            trap cleanup_registry EXIT
+            printf '%s' "$REGISTRY_TOKEN" | docker login ghcr.io -u "$REGISTRY_USER" --password-stdin
+            docker pull "$IMAGE_NAME:$SOURCE_SHA"
+            cleanup_registry
+            trap - EXIT
+            unset REGISTRY_TOKEN
+            docker tag "$IMAGE_NAME:$SOURCE_SHA" cytopia-gate1:candidate
             docker rm -f cytopia-gate1-previous 2>/dev/null || true
             deploy_complete=0
             rollback() {

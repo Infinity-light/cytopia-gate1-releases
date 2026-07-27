@@ -24,7 +24,7 @@ permissions:
 jobs:
   test-build-deploy:
     runs-on: ubuntu-latest
-    timeout-minutes: 25
+    timeout-minutes: 40
     env:
       SOURCE_REPO: ${{ github.event.client_payload.repo || inputs.repo || 'Infinity-light/cytopia-gate1' }}
       SOURCE_REF: ${{ github.event.client_payload.ref || inputs.ref || 'main' }}
@@ -95,16 +95,34 @@ jobs:
         run: docker save "cytopia-gate1:$SOURCE_SHA" | gzip > image.tar.gz
 
       - name: Transfer image
-        uses: appleboy/scp-action@v0.1.7
-        with:
-          host: ${{ secrets.SERVER_HOST }}
-          username: ${{ secrets.SERVER_USER }}
-          port: ${{ secrets.SERVER_PORT || '22' }}
-          password: ${{ secrets.SERVER_PASSWORD }}
-          source: image.tar.gz
-          target: /tmp
-          timeout: 120s
-          command_timeout: 10m
+        shell: bash
+        env:
+          SERVER_HOST: ${{ secrets.SERVER_HOST }}
+          SERVER_USER: ${{ secrets.SERVER_USER }}
+          SERVER_PORT: ${{ secrets.SERVER_PORT || '22' }}
+          SERVER_PASSWORD: ${{ secrets.SERVER_PASSWORD }}
+        run: |
+          command -v sshpass >/dev/null || {
+            sudo apt-get update
+            sudo apt-get install -y sshpass
+          }
+          transferred=0
+          for attempt in 1 2 3; do
+            if sshpass -p "$SERVER_PASSWORD" scp \
+              -P "$SERVER_PORT" \
+              -o ConnectTimeout=180 \
+              -o ConnectionAttempts=2 \
+              -o ServerAliveInterval=30 \
+              -o ServerAliveCountMax=20 \
+              -o StrictHostKeyChecking=accept-new \
+              image.tar.gz "$SERVER_USER@$SERVER_HOST:/tmp/image.tar.gz"; then
+              transferred=1
+              break
+            fi
+            echo "Image transfer attempt $attempt failed"
+            sleep 10
+          done
+          [ "$transferred" = 1 ]
 
       - name: Deploy with backup and rollback
         uses: appleboy/ssh-action@v1
@@ -115,6 +133,7 @@ jobs:
           username: ${{ secrets.SERVER_USER }}
           port: ${{ secrets.SERVER_PORT || '22' }}
           password: ${{ secrets.SERVER_PASSWORD }}
+          timeout: 300s
           command_timeout: 25m
           envs: SOURCE_SHA
           script: |

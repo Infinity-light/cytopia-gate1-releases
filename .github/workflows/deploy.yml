@@ -1,0 +1,191 @@
+name: Build and deploy cytopia-gate1
+
+on:
+  repository_dispatch:
+    types: [deploy]
+  workflow_dispatch:
+    inputs:
+      repo:
+        description: Private source repository
+        required: false
+        default: Infinity-light/cytopia-gate1
+      ref:
+        description: Source branch, tag, or commit
+        required: false
+        default: main
+
+concurrency:
+  group: deploy-cytopia-gate1-production
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  test-build-deploy:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    env:
+      SOURCE_REPO: ${{ github.event.client_payload.repo || inputs.repo || 'Infinity-light/cytopia-gate1' }}
+      SOURCE_REF: ${{ github.event.client_payload.ref || inputs.ref || 'main' }}
+      EXPECTED_SOURCE_SHA: ${{ github.event.client_payload.source_sha || '' }}
+    steps:
+      - name: Check out private source
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ env.SOURCE_REPO }}
+          ref: ${{ env.SOURCE_REF }}
+          token: ${{ secrets.GH_RELEASE_REPO_TOKEN }}
+          fetch-depth: 1
+
+      - name: Pin and verify source revision
+        shell: bash
+        run: |
+          source_sha=$(git rev-parse HEAD)
+          if [ -n "$EXPECTED_SOURCE_SHA" ] && [ "$source_sha" != "$EXPECTED_SOURCE_SHA" ]; then
+            echo "Checked out $source_sha, expected $EXPECTED_SOURCE_SHA"
+            exit 1
+          fi
+          echo "SOURCE_SHA=$source_sha" >> "$GITHUB_ENV"
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Install test dependencies
+        run: |
+          pip install -r requirements-dev.txt
+          pip install --index-url https://pypi.org/simple pip-audit
+          python -m playwright install --with-deps chromium
+
+      - name: Audit production dependencies
+        run: python -m pip_audit -r requirements.txt --index-url https://pypi.org/simple
+
+      - name: Compile and test
+        run: |
+          python -m compileall backend scripts
+          pytest -q
+          git diff --check
+
+      - name: Build image
+        run: docker build -t "cytopia-gate1:$SOURCE_SHA" .
+
+      - name: Container smoke test with persistent mounts
+        run: |
+          mkdir -p "$RUNNER_TEMP/cytopia-data" "$RUNNER_TEMP/cytopia-uploads"
+          chmod 777 "$RUNNER_TEMP/cytopia-data" "$RUNNER_TEMP/cytopia-uploads"
+          docker run -d --name cytopia-smoke -p 8010:8010 \
+            -v "$RUNNER_TEMP/cytopia-data:/app/data" \
+            -v "$RUNNER_TEMP/cytopia-uploads:/app/uploads" \
+            -e PUBLIC_BASE_URL=http://127.0.0.1:8010 \
+            -e COOKIE_SECURE=false \
+            "cytopia-gate1:$SOURCE_SHA"
+          for route in /health /summercamp/ /apply/ /prework/ /api/showcase; do
+            for attempt in 1 2 3 4 5; do
+              code=$(curl -sS -o /dev/null -w '%{http_code}' "http://127.0.0.1:8010$route" || true)
+              [ "$code" -ge 200 ] && [ "$code" -lt 400 ] && break
+              [ "$attempt" = 5 ] && { docker logs cytopia-smoke; exit 1; }
+              sleep 3
+            done
+          done
+          docker rm -f cytopia-smoke
+
+      - name: Package image
+        run: docker save "cytopia-gate1:$SOURCE_SHA" | gzip > image.tar.gz
+
+      - name: Transfer image
+        uses: appleboy/scp-action@v0.1.7
+        with:
+          host: ${{ secrets.SERVER_HOST }}
+          username: ${{ secrets.SERVER_USER }}
+          port: ${{ secrets.SERVER_PORT || '22' }}
+          password: ${{ secrets.SERVER_PASSWORD }}
+          source: image.tar.gz
+          target: /tmp
+
+      - name: Deploy with backup and rollback
+        uses: appleboy/ssh-action@v1
+        env:
+          SOURCE_SHA: ${{ env.SOURCE_SHA }}
+        with:
+          host: ${{ secrets.SERVER_HOST }}
+          username: ${{ secrets.SERVER_USER }}
+          port: ${{ secrets.SERVER_PORT || '22' }}
+          password: ${{ secrets.SERVER_PASSWORD }}
+          command_timeout: 25m
+          envs: SOURCE_SHA
+          script: |
+            set -eu
+            APP=/opt/apps/cytopia-gate1
+            mkdir -p "$APP/data" "$APP/uploads" "$APP/backups"
+            chown -R 10001:10001 "$APP/data" "$APP/uploads"
+            docker load < /tmp/image.tar.gz
+            rm -f /tmp/image.tar.gz
+            docker tag "cytopia-gate1:$SOURCE_SHA" cytopia-gate1:candidate
+            docker rm -f cytopia-gate1-previous 2>/dev/null || true
+            deploy_complete=0
+            rollback() {
+              [ "$deploy_complete" = 1 ] && return
+              echo "Deployment failed; restoring previous container"
+              docker rm -f cytopia-gate1 2>/dev/null || true
+              if docker inspect cytopia-gate1-previous >/dev/null 2>&1; then
+                docker rename cytopia-gate1-previous cytopia-gate1
+                docker start cytopia-gate1
+              fi
+            }
+            trap rollback EXIT
+            if docker inspect cytopia-gate1 >/dev/null 2>&1; then
+              docker rename cytopia-gate1 cytopia-gate1-previous
+              docker stop cytopia-gate1-previous
+            fi
+            if [ -f "$APP/data/cytopia.sqlite3" ]; then
+              cp "$APP/data/cytopia.sqlite3" "$APP/backups/cytopia-$(date +%Y%m%d-%H%M%S).sqlite3"
+            fi
+            docker run -d --name cytopia-gate1 --restart unless-stopped -p 8010:8010 \
+              -v "$APP/data:/app/data" -v "$APP/uploads:/app/uploads" \
+              -e PUBLIC_BASE_URL=https://summercamp.godpenai.com \
+              -e COOKIE_SECURE=true \
+              -e APP_COMMIT_SHA="$SOURCE_SHA" \
+              cytopia-gate1:candidate
+            passed=0
+            for route in /health /summercamp/ /apply/ /prework/ /api/showcase; do
+              route_ok=0
+              for attempt in 1 2 3 4 5 6; do
+                code=$(curl -sS -o /dev/null -w '%{http_code}' "http://127.0.0.1:8010$route" || true)
+                if [ "$code" -ge 200 ] && [ "$code" -lt 400 ]; then route_ok=1; break; fi
+                sleep 5
+              done
+              if [ "$route_ok" != 1 ]; then passed=1; break; fi
+            done
+            if [ "$passed" != 0 ]; then
+              docker logs cytopia-gate1 --tail 100 || true
+              exit 1
+            fi
+            initial_restarts=$(docker inspect cytopia-gate1 --format '{{.RestartCount}}')
+            if [ "$initial_restarts" != 0 ]; then
+              echo "Container restarted during boot check: $initial_restarts"
+              docker logs cytopia-gate1 --tail 100 || true
+              exit 1
+            fi
+            echo "Observing runtime stability for 60 seconds"
+            sleep 60
+            stable_restarts=$(docker inspect cytopia-gate1 --format '{{.RestartCount}}')
+            stable_health=$(curl -sS http://127.0.0.1:8010/health || true)
+            if [ "$stable_restarts" != 0 ] || ! printf '%s' "$stable_health" | grep -q '"status":"ok"'; then
+              echo "Container failed stability check (restarts=$stable_restarts)"
+              docker logs cytopia-gate1 --tail 100 || true
+              exit 1
+            fi
+            deploy_complete=1
+            trap - EXIT
+            docker rm -f cytopia-gate1-previous 2>/dev/null || true
+            docker tag cytopia-gate1:candidate cytopia-gate1:latest
+            find "$APP/backups" -type f -name 'cytopia-*.sqlite3' -mtime +14 -delete
+            docker image prune -f
+
+      - name: Production E2E
+        env:
+          BASE_URL: https://summercamp.godpenai.com
+          EXPECTED_COMMIT_SHA: ${{ env.SOURCE_SHA }}
+        run: python scripts/production_e2e.py

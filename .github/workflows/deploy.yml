@@ -29,6 +29,8 @@ jobs:
       SOURCE_REPO: ${{ github.event.client_payload.repo || inputs.repo || 'Infinity-light/cytopia-gate1' }}
       SOURCE_REF: ${{ github.event.client_payload.ref || inputs.ref || 'main' }}
       EXPECTED_SOURCE_SHA: ${{ github.event.client_payload.source_sha || '' }}
+      STUDENT_DOMAIN_POOL: >-
+        app01.apps.summercamp.godpenai.com,app02.apps.summercamp.godpenai.com,app03.apps.summercamp.godpenai.com,app04.apps.summercamp.godpenai.com,app05.apps.summercamp.godpenai.com,app06.apps.summercamp.godpenai.com,app07.apps.summercamp.godpenai.com,app08.apps.summercamp.godpenai.com,app09.apps.summercamp.godpenai.com,app10.apps.summercamp.godpenai.com,app11.apps.summercamp.godpenai.com,app12.apps.summercamp.godpenai.com,app13.apps.summercamp.godpenai.com,app14.apps.summercamp.godpenai.com,app15.apps.summercamp.godpenai.com,app16.apps.summercamp.godpenai.com,app17.apps.summercamp.godpenai.com,app18.apps.summercamp.godpenai.com,app19.apps.summercamp.godpenai.com,app20.apps.summercamp.godpenai.com,app21.apps.summercamp.godpenai.com,app22.apps.summercamp.godpenai.com,app23.apps.summercamp.godpenai.com,app24.apps.summercamp.godpenai.com,app25.apps.summercamp.godpenai.com,app26.apps.summercamp.godpenai.com,app27.apps.summercamp.godpenai.com,app28.apps.summercamp.godpenai.com,app29.apps.summercamp.godpenai.com,app30.apps.summercamp.godpenai.com
     steps:
       - name: Check out private source
         uses: actions/checkout@v4
@@ -110,6 +112,9 @@ jobs:
         uses: appleboy/ssh-action@v1
         env:
           SOURCE_SHA: ${{ env.SOURCE_SHA }}
+          STUDENT_DOMAIN_POOL: ${{ env.STUDENT_DOMAIN_POOL }}
+          AI_GATEWAY_BASE_URL: ${{ secrets.AI_GATEWAY_BASE_URL }}
+          AI_GATEWAY_API_KEY: ${{ secrets.AI_GATEWAY_API_KEY }}
         with:
           host: ${{ secrets.SERVER_HOST }}
           username: ${{ secrets.SERVER_USER }}
@@ -117,12 +122,21 @@ jobs:
           password: ${{ secrets.SERVER_PASSWORD }}
           timeout: 300s
           command_timeout: 25m
-          envs: SOURCE_SHA
+          envs: SOURCE_SHA,STUDENT_DOMAIN_POOL,AI_GATEWAY_BASE_URL,AI_GATEWAY_API_KEY
           script: |
             set -eu
             APP=/opt/apps/cytopia-gate1
             mkdir -p "$APP/data" "$APP/uploads" "$APP/backups"
             chown -R 10001:10001 "$APP/data" "$APP/uploads"
+            umask 077
+            {
+              printf 'DEPLOYMENT_BASE_DOMAIN=%s\n' 'apps.summercamp.godpenai.com'
+              printf 'DEPLOYMENT_DOMAIN_POOL=%s\n' "$STUDENT_DOMAIN_POOL"
+              printf 'AI_GATEWAY_BASE_URL=%s\n' "$AI_GATEWAY_BASE_URL"
+              printf 'AI_GATEWAY_API_KEY=%s\n' "$AI_GATEWAY_API_KEY"
+              printf 'AI_GATEWAY_MODEL=%s\n' 'DeepSeek-V3.2'
+              printf 'AI_GATEWAY_DAILY_LIMIT=%s\n' '100'
+            } > "$APP/runtime.env"
             docker load < /tmp/image.tar.gz
             rm -f /tmp/image.tar.gz
             docker tag "cytopia-gate1:$SOURCE_SHA" cytopia-gate1:candidate
@@ -147,6 +161,7 @@ jobs:
             fi
             docker run -d --name cytopia-gate1 --restart unless-stopped -p 8010:8010 \
               -v "$APP/data:/app/data" -v "$APP/uploads:/app/uploads" \
+              --env-file "$APP/runtime.env" \
               -e PUBLIC_BASE_URL=https://summercamp.godpenai.com \
               -e COOKIE_SECURE=true \
               -e APP_COMMIT_SHA="$SOURCE_SHA" \
@@ -186,6 +201,120 @@ jobs:
             docker tag cytopia-gate1:candidate cytopia-gate1:latest
             find "$APP/backups" -type f -name 'cytopia-*.sqlite3' -mtime +14 -delete
             docker image prune -f
+
+      - name: Configure HTTPS gateway for student deployment domains
+        uses: appleboy/ssh-action@v1
+        env:
+          STUDENT_DOMAIN_POOL: ${{ env.STUDENT_DOMAIN_POOL }}
+        with:
+          host: ${{ secrets.SERVER_HOST }}
+          username: ${{ secrets.SERVER_USER }}
+          port: ${{ secrets.SERVER_PORT || '22' }}
+          password: ${{ secrets.SERVER_PASSWORD }}
+          timeout: 300s
+          command_timeout: 20m
+          envs: STUDENT_DOMAIN_POOL
+          script: |
+            set -eu
+            APP=/opt/apps/cytopia-gate1
+            NGINX=/www/server/nginx/sbin/nginx
+            NGINX_MAIN=/www/server/nginx/conf/nginx.conf
+            VHOST=/www/server/panel/vhost/nginx/cytopia-student-sites.conf
+            CERT="$APP/letsencrypt/live/summercamp.godpenai.com/fullchain.pem"
+            DOMAIN_NAMES=$(printf '%s' "$STUDENT_DOMAIN_POOL" | tr ',' ' ')
+            FIRST_DOMAIN=$(printf '%s' "$STUDENT_DOMAIN_POOL" | cut -d, -f1)
+            LAST_DOMAIN=$(printf '%s' "$STUDENT_DOMAIN_POOL" | awk -F, '{print $NF}')
+            mkdir -p "$APP/acme-webroot" "$APP/letsencrypt"
+            if [ -f "$VHOST" ]; then
+              cp "$VHOST" "$VHOST.before-student-deploy"
+              HAD_VHOST=1
+            else
+              HAD_VHOST=0
+            fi
+            restore_gateway() {
+              if [ "$HAD_VHOST" = 1 ]; then
+                mv "$VHOST.before-student-deploy" "$VHOST"
+              else
+                rm -f "$VHOST"
+              fi
+              "$NGINX" -t -c "$NGINX_MAIN" >/dev/null 2>&1 \
+                && "$NGINX" -s reload -c "$NGINX_MAIN" || true
+            }
+            trap restore_gateway EXIT
+            cat > "$VHOST" <<'NGINX'
+            server {
+              listen 80;
+              server_name __STUDENT_DOMAINS__;
+              location ^~ /.well-known/acme-challenge/ {
+                root /opt/apps/cytopia-gate1/acme-webroot;
+                default_type text/plain;
+              }
+              location / {
+                return 301 https://$host$request_uri;
+              }
+            }
+            server {
+              listen 443 ssl http2;
+              server_name __STUDENT_DOMAINS__;
+              ssl_certificate /opt/apps/cytopia-gate1/letsencrypt/live/summercamp.godpenai.com/fullchain.pem;
+              ssl_certificate_key /opt/apps/cytopia-gate1/letsencrypt/live/summercamp.godpenai.com/privkey.pem;
+              ssl_protocols TLSv1.2 TLSv1.3;
+              add_header X-Content-Type-Options nosniff always;
+              location / {
+                proxy_pass http://127.0.0.1:8010;
+                proxy_http_version 1.1;
+                proxy_set_header Host $host;
+                proxy_set_header X-Real-IP $remote_addr;
+                proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+                proxy_set_header X-Forwarded-Proto https;
+                proxy_set_header X-Forwarded-Host $host;
+              }
+            }
+            NGINX
+            sed -i "s|__STUDENT_DOMAINS__|$DOMAIN_NAMES|g" "$VHOST"
+            "$NGINX" -t -c "$NGINX_MAIN"
+            "$NGINX" -s reload -c "$NGINX_MAIN"
+            dns_ready=0
+            for attempt in $(seq 1 30); do
+              if getent ahostsv4 "$FIRST_DOMAIN" | awk '{print $1}' | grep -qx '47.101.37.244' \
+                && getent ahostsv4 "$LAST_DOMAIN" | awk '{print $1}' | grep -qx '47.101.37.244'; then
+                dns_ready=1
+                break
+              fi
+              sleep 20
+            done
+            if [ "$dns_ready" != 1 ]; then
+              echo "Student deployment DNS did not converge in ten minutes"
+              exit 1
+            fi
+            if ! openssl x509 -in "$CERT" -noout -text | grep -Fq "DNS:$LAST_DOMAIN"; then
+              DOMAIN_ARGS=""
+              for domain in $DOMAIN_NAMES; do
+                DOMAIN_ARGS="$DOMAIN_ARGS -d $domain"
+              done
+              docker pull certbot/certbot:v4.1.1
+              # DOMAIN_NAMES is a fixed, repository-controlled list of DNS names.
+              # shellcheck disable=SC2086
+              docker run --rm \
+                -v "$APP/acme-webroot:/var/www/certbot" \
+                -v "$APP/letsencrypt:/etc/letsencrypt" \
+                certbot/certbot:v4.1.1 certonly \
+                --webroot --webroot-path /var/www/certbot \
+                --cert-name summercamp.godpenai.com --expand \
+                --non-interactive --agree-tos \
+                -d summercamp.godpenai.com $DOMAIN_ARGS
+            fi
+            "$NGINX" -t -c "$NGINX_MAIN"
+            "$NGINX" -s reload -c "$NGINX_MAIN"
+            code=$(curl --resolve "$FIRST_DOMAIN:443:127.0.0.1" \
+              -sS -o /tmp/cytopia-student-domain-check.json -w '%{http_code}' \
+              "https://$FIRST_DOMAIN/")
+            if [ "$code" != 404 ] || ! grep -q '"site_not_found"' /tmp/cytopia-student-domain-check.json; then
+              echo "Student HTTPS gateway verification failed (HTTP $code)"
+              exit 1
+            fi
+            rm -f /tmp/cytopia-student-domain-check.json "$VHOST.before-student-deploy"
+            trap - EXIT
 
       - name: Production E2E
         env:

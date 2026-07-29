@@ -306,7 +306,7 @@ jobs:
             fi
             "$NGINX" -t -c "$NGINX_MAIN"
             "$NGINX" -s reload -c "$NGINX_MAIN"
-            code=$(curl --resolve "$FIRST_DOMAIN:443:127.0.0.1" \
+            code=$(curl --noproxy '*' --resolve "$FIRST_DOMAIN:443:127.0.0.1" \
               -sS -o /tmp/cytopia-student-domain-check.json -w '%{http_code}' \
               "https://$FIRST_DOMAIN/")
             if [ "$code" != 404 ] || ! grep -q '"site_not_found"' /tmp/cytopia-student-domain-check.json; then

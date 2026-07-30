@@ -337,13 +337,22 @@ jobs:
             "$NGINX" -t -c "$NGINX_MAIN"
             "$NGINX" -s reload -c "$NGINX_MAIN"
             code=$(curl --noproxy '*' --resolve "$FIRST_DOMAIN:443:127.0.0.1" \
-              -sS -o /tmp/cytopia-student-domain-check.json -w '%{http_code}' \
+              -sS -D /tmp/cytopia-student-domain-check.headers \
+              -o /tmp/cytopia-student-domain-check.json -w '%{http_code}' \
               "https://$FIRST_DOMAIN/")
-            if [ "$code" != 404 ] || ! grep -q '"site_not_found"' /tmp/cytopia-student-domain-check.json; then
+            gateway_ok=0
+            if [ "$code" = 404 ] && grep -q '"site_not_found"' /tmp/cytopia-student-domain-check.json; then
+              gateway_ok=1
+            fi
+            if [ "$code" = 200 ] && grep -qi '^x-deployment-project:' /tmp/cytopia-student-domain-check.headers; then
+              gateway_ok=1
+            fi
+            if [ "$gateway_ok" != 1 ]; then
               echo "Student HTTPS gateway verification failed (HTTP $code)"
               exit 1
             fi
-            rm -f /tmp/cytopia-student-domain-check.json "$VHOST.before-student-deploy"
+            rm -f /tmp/cytopia-student-domain-check.json \
+              /tmp/cytopia-student-domain-check.headers "$VHOST.before-student-deploy"
             trap - EXIT
 
       - name: Production E2E

@@ -70,8 +70,10 @@ jobs:
           pytest -q
           git diff --check
 
-      - name: Build image
-        run: docker build -t "cytopia-gate1:$SOURCE_SHA" .
+      - name: Build control-plane and runner images
+        run: |
+          docker build -t "cytopia-gate1:$SOURCE_SHA" .
+          docker build -f runner/Dockerfile -t "cytopia-runner:$SOURCE_SHA" .
 
       - name: Container smoke test with persistent mounts
         run: |
@@ -93,10 +95,10 @@ jobs:
           done
           docker rm -f cytopia-smoke
 
-      - name: Package image
-        run: docker save "cytopia-gate1:$SOURCE_SHA" | gzip > image.tar.gz
+      - name: Package images
+        run: docker save "cytopia-gate1:$SOURCE_SHA" "cytopia-runner:$SOURCE_SHA" | gzip > images.tar.gz
 
-      - name: Transfer image
+      - name: Transfer images and compose topology
         uses: appleboy/scp-action@v0.1.7
         with:
           host: ${{ secrets.SERVER_HOST }}
@@ -105,7 +107,7 @@ jobs:
           password: ${{ secrets.SERVER_PASSWORD }}
           timeout: 300s
           command_timeout: 25m
-          source: image.tar.gz
+          source: images.tar.gz,docker-compose.yml
           target: /tmp
 
       - name: Deploy with backup and rollback
@@ -126,7 +128,7 @@ jobs:
           script: |
             set -eu
             APP=/opt/apps/cytopia-gate1
-            mkdir -p "$APP/data" "$APP/uploads" "$APP/backups"
+            mkdir -p "$APP/data/deployments" "$APP/data/runner" "$APP/uploads" "$APP/backups"
             chown -R 10001:10001 "$APP/data" "$APP/uploads"
             umask 077
             {
@@ -137,18 +139,40 @@ jobs:
               printf 'AI_GATEWAY_MODEL=%s\n' 'DeepSeek-V3.2'
               printf 'AI_GATEWAY_DAILY_LIMIT=%s\n' '100'
             } > "$APP/runtime.env"
-            docker load < /tmp/image.tar.gz
-            rm -f /tmp/image.tar.gz
+            docker load < /tmp/images.tar.gz
+            rm -f /tmp/images.tar.gz
+            cp /tmp/docker-compose.yml "$APP/docker-compose.yml"
+            rm -f /tmp/docker-compose.yml
             docker tag "cytopia-gate1:$SOURCE_SHA" cytopia-gate1:candidate
+            docker tag "cytopia-runner:$SOURCE_SHA" cytopia-runner:candidate
+            touch "$APP/.env"
+            chmod 600 "$APP/.env"
+            ensure_secret() {
+              key="$1"
+              if ! grep -q "^${key}=" "$APP/.env"; then
+                printf '%s=%s\n' "$key" "$(openssl rand -hex 32)" >> "$APP/.env"
+              fi
+            }
+            ensure_secret DEPLOYMENT_RUNNER_TOKEN
+            ensure_secret DEPLOYMENT_MYSQL_ROOT_PASSWORD
+            ensure_secret DEPLOYMENT_POSTGRES_PASSWORD
+            grep -q '^PUBLIC_BASE_URL=' "$APP/.env" || printf '%s\n' 'PUBLIC_BASE_URL=https://summercamp.godpenai.com' >> "$APP/.env"
+            grep -q '^COOKIE_SECURE=' "$APP/.env" || printf '%s\n' 'COOKIE_SECURE=true' >> "$APP/.env"
             docker rm -f cytopia-gate1-previous 2>/dev/null || true
+            docker rm -f cytopia-runner-previous 2>/dev/null || true
             deploy_complete=0
             rollback() {
               [ "$deploy_complete" = 1 ] && return
-              echo "Deployment failed; restoring previous container"
+              echo "Deployment failed; restoring previous containers"
               docker rm -f cytopia-gate1 2>/dev/null || true
+              docker rm -f cytopia-runner 2>/dev/null || true
               if docker inspect cytopia-gate1-previous >/dev/null 2>&1; then
                 docker rename cytopia-gate1-previous cytopia-gate1
                 docker start cytopia-gate1
+              fi
+              if docker inspect cytopia-runner-previous >/dev/null 2>&1; then
+                docker rename cytopia-runner-previous cytopia-runner
+                docker start cytopia-runner
               fi
             }
             trap rollback EXIT
@@ -156,16 +180,20 @@ jobs:
               docker rename cytopia-gate1 cytopia-gate1-previous
               docker stop cytopia-gate1-previous
             fi
+            if docker inspect cytopia-runner >/dev/null 2>&1; then
+              docker rename cytopia-runner cytopia-runner-previous
+              docker stop cytopia-runner-previous
+            fi
             if [ -f "$APP/data/cytopia.sqlite3" ]; then
               cp "$APP/data/cytopia.sqlite3" "$APP/backups/cytopia-$(date +%Y%m%d-%H%M%S).sqlite3"
             fi
-            docker run -d --name cytopia-gate1 --restart unless-stopped -p 8010:8010 \
-              -v "$APP/data:/app/data" -v "$APP/uploads:/app/uploads" \
-              --env-file "$APP/runtime.env" \
-              -e PUBLIC_BASE_URL=https://summercamp.godpenai.com \
-              -e COOKIE_SECURE=true \
-              -e APP_COMMIT_SHA="$SOURCE_SHA" \
-              cytopia-gate1:candidate
+            cd "$APP"
+            set -a
+            . "$APP/runtime.env"
+            set +a
+            export CYTOPIA_IMAGE_TAG=candidate
+            export APP_COMMIT_SHA="$SOURCE_SHA"
+            docker compose up -d --no-build
             passed=0
             for route in /health /summercamp/ /apply/ /prework/ /api/showcase; do
               route_ok=0
@@ -198,7 +226,9 @@ jobs:
             deploy_complete=1
             trap - EXIT
             docker rm -f cytopia-gate1-previous 2>/dev/null || true
+            docker rm -f cytopia-runner-previous 2>/dev/null || true
             docker tag cytopia-gate1:candidate cytopia-gate1:latest
+            docker tag cytopia-runner:candidate cytopia-runner:latest
             find "$APP/backups" -type f -name 'cytopia-*.sqlite3' -mtime +14 -delete
             docker image prune -f
 

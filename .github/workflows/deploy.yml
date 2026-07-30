@@ -75,6 +75,63 @@ jobs:
           docker build -t "cytopia-gate1:$SOURCE_SHA" .
           docker build -f runner/Dockerfile -t "cytopia-runner:$SOURCE_SHA" .
 
+      - name: Full-stack runner smoke test with build-only dependency
+        run: |
+          set -euo pipefail
+          project_id=cccccccccccccccccccccccccccccccc
+          release_id=dddddddddddddddddddddddddddddddd
+          fixture="$RUNNER_TEMP/cytopia-runner-smoke"
+          network=cytopia-runner-smoke
+          cleanup() {
+            docker rm -f "cytopia-app-$release_id" cytopia-runner-smoke 2>/dev/null || true
+            docker image rm "cytopia-student:$release_id" 2>/dev/null || true
+            docker network rm "$network" 2>/dev/null || true
+          }
+          trap cleanup EXIT
+          mkdir -p "$fixture/releases/$release_id" "$fixture/state"
+          cat > "$fixture/releases/$release_id/package.json" <<'JSON'
+          {
+            "name": "cytopia-runner-smoke",
+            "version": "1.0.0",
+            "scripts": {
+              "build": "node build.js",
+              "start": "node server.js"
+            },
+            "devDependencies": {
+              "left-pad": "1.3.0"
+            }
+          }
+          JSON
+          cat > "$fixture/releases/$release_id/build.js" <<'JS'
+          const leftPad = require("left-pad");
+          if (leftPad("ok", 4, "0") !== "00ok") process.exit(1);
+          JS
+          cat > "$fixture/releases/$release_id/server.js" <<'JS'
+          require("http").createServer((request, response) => {
+            response.writeHead(request.url === "/health" ? 200 : 404);
+            response.end(request.url === "/health" ? "ok" : "not found");
+          }).listen(Number(process.env.PORT || 8080), "0.0.0.0");
+          JS
+          docker network create "$network"
+          docker run -d --name cytopia-runner-smoke -p 8021:8020 \
+            -v /var/run/docker.sock:/var/run/docker.sock \
+            -v "$fixture/releases:/deployments/releases" \
+            -v "$fixture/state:/state" \
+            -e DEPLOYMENT_RUNNER_TOKEN=smoke-token \
+            -e RUNTIME_NETWORK="$network" \
+            "cytopia-runner:$SOURCE_SHA"
+          for attempt in 1 2 3 4 5; do
+            curl -fsS http://127.0.0.1:8021/health >/dev/null && break
+            [ "$attempt" = 5 ] && { docker logs cytopia-runner-smoke; exit 1; }
+            sleep 2
+          done
+          curl -fsS -X POST http://127.0.0.1:8021/v1/releases \
+            -H 'Authorization: Bearer smoke-token' \
+            -H 'Content-Type: application/json' \
+            --data "{\"project_id\":\"$project_id\",\"release_id\":\"$release_id\",\"preset\":\"node\",\"database\":\"none\",\"entrypoint\":\"server.js\",\"healthcheck\":\"/health\"}"
+          docker exec cytopia-runner-smoke python -c \
+            "import httpx; response=httpx.get('http://cytopia-app-$release_id:8080/health'); assert response.status_code == 200"
+
       - name: Container smoke test with persistent mounts
         run: |
           mkdir -p "$RUNNER_TEMP/cytopia-data" "$RUNNER_TEMP/cytopia-uploads"

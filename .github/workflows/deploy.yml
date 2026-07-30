@@ -200,6 +200,7 @@ jobs:
             {
               printf 'DEPLOYMENT_BASE_DOMAIN=%s\n' 'apps.summercamp.godpenai.com'
               printf 'DEPLOYMENT_DOMAIN_POOL=%s\n' "$STUDENT_DOMAIN_POOL"
+              printf 'DEPLOYMENT_DISABLED_HOSTNAMES=%s\n' 'app07.apps.summercamp.godpenai.com'
               printf 'AI_GATEWAY_BASE_URL=%s\n' "$AI_GATEWAY_BASE_URL"
               printf 'AI_GATEWAY_API_KEY=%s\n' "$AI_GATEWAY_API_KEY"
               printf 'AI_GATEWAY_MODEL=%s\n' 'DeepSeek-V3.2'
@@ -274,6 +275,17 @@ jobs:
               docker logs cytopia-gate1 --tail 100 || true
               exit 1
             fi
+            disabled_site_code=$(curl -sS -o /tmp/cytopia-disabled-site.json \
+              -w '%{http_code}' \
+              -H 'Host: app07.apps.summercamp.godpenai.com' \
+              http://127.0.0.1:8010/ || true)
+            if [ "$disabled_site_code" != 410 ] || \
+              ! grep -q '"site_disabled"' /tmp/cytopia-disabled-site.json; then
+              echo "Disabled site verification failed (HTTP $disabled_site_code)"
+              docker logs cytopia-gate1 --tail 100 || true
+              exit 1
+            fi
+            rm -f /tmp/cytopia-disabled-site.json
             initial_restarts=$(docker inspect cytopia-gate1 --format '{{.RestartCount}}')
             if [ "$initial_restarts" != 0 ]; then
               echo "Container restarted during boot check: $initial_restarts"

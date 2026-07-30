@@ -114,6 +114,7 @@ jobs:
           JS
           docker network create "$network"
           docker run -d --name cytopia-runner-smoke -p 8021:8020 \
+            --network "$network" \
             -v /var/run/docker.sock:/var/run/docker.sock \
             -v "$fixture/releases:/deployments/releases" \
             -v "$fixture/state:/state" \
@@ -125,10 +126,18 @@ jobs:
             [ "$attempt" = 5 ] && { docker logs cytopia-runner-smoke; exit 1; }
             sleep 2
           done
-          curl -fsS -X POST http://127.0.0.1:8021/v1/releases \
+          response=$(curl -sS -X POST http://127.0.0.1:8021/v1/releases \
+            -w $'\n%{http_code}' \
             -H 'Authorization: Bearer smoke-token' \
             -H 'Content-Type: application/json' \
-            --data "{\"project_id\":\"$project_id\",\"release_id\":\"$release_id\",\"preset\":\"node\",\"database\":\"none\",\"entrypoint\":\"server.js\",\"healthcheck\":\"/health\"}"
+            --data "{\"project_id\":\"$project_id\",\"release_id\":\"$release_id\",\"preset\":\"node\",\"database\":\"none\",\"entrypoint\":\"server.js\",\"healthcheck\":\"/health\"}")
+          status=${response##*$'\n'}
+          body=${response%$'\n'*}
+          echo "$body"
+          if [ "$status" -lt 200 ] || [ "$status" -ge 300 ]; then
+            docker logs cytopia-runner-smoke
+            exit 1
+          fi
           docker exec cytopia-runner-smoke python -c \
             "import httpx; response=httpx.get('http://cytopia-app-$release_id:8080/health'); assert response.status_code == 200"
 

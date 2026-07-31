@@ -1,0 +1,35 @@
+name: Cleanup one-shot source runner
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  cleanup:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Remove the finished ephemeral runner files
+        uses: appleboy/ssh-action@v1
+        with:
+          host: ${{ secrets.SERVER_HOST }}
+          username: ${{ secrets.SERVER_USER }}
+          port: ${{ secrets.SERVER_PORT || '22' }}
+          password: ${{ secrets.SERVER_PASSWORD }}
+          timeout: 60s
+          command_timeout: 2m
+          script: |
+            set -eu
+            RUNNER_DIR=/opt/actions-runner-cytopia-oss
+            case "$RUNNER_DIR" in
+              /opt/actions-runner-cytopia-oss) ;;
+              *) echo "Unexpected runner path"; exit 2 ;;
+            esac
+            if pgrep -f "$RUNNER_DIR/bin/Runner.Listener" >/dev/null 2>&1; then
+              echo "Runner is still active; refusing cleanup"
+              exit 2
+            fi
+            rm -rf "$RUNNER_DIR"
+            echo "Ephemeral source runner files removed"

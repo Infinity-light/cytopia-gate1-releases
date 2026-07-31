@@ -11,23 +11,6 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 8
     steps:
-      - name: Download runner on the GitHub-hosted machine
-        run: |
-          curl -fsSLO \
-            https://github.com/actions/runner/releases/download/v2.336.0/actions-runner-linux-x64-2.336.0.tar.gz
-
-      - name: Transfer runner archive
-        uses: appleboy/scp-action@v0.1.7
-        with:
-          host: ${{ secrets.SERVER_HOST }}
-          username: ${{ secrets.SERVER_USER }}
-          port: ${{ secrets.SERVER_PORT || '22' }}
-          password: ${{ secrets.SERVER_PASSWORD }}
-          timeout: 120s
-          command_timeout: 5m
-          source: actions-runner-linux-x64-2.336.0.tar.gz
-          target: /tmp
-
       - name: Start an ephemeral runner for the private source repository
         uses: appleboy/ssh-action@v1
         env:
@@ -43,18 +26,9 @@ jobs:
           script: |
             set -eu
             RUNNER_DIR=/opt/actions-runner-cytopia-oss
-            if [ -e "$RUNNER_DIR" ]; then
-              if [ ! -x "$RUNNER_DIR/bin/Runner.Listener" ]; then
-                echo "Incomplete runner directory exists; refusing to reuse"
-                exit 2
-              fi
-              rm -f /tmp/actions-runner-linux-x64-2.336.0.tar.gz
-            else
-              mkdir -p "$RUNNER_DIR"
-              cd "$RUNNER_DIR"
-              mv /tmp/actions-runner-linux-x64-2.336.0.tar.gz .
-              tar xzf actions-runner-linux-x64-2.336.0.tar.gz
-              rm -f actions-runner-linux-x64-2.336.0.tar.gz
+            if [ ! -x "$RUNNER_DIR/bin/Runner.Listener" ]; then
+              echo "Prepared runner directory is missing"
+              exit 2
             fi
             cd "$RUNNER_DIR"
             docker rm -f cytopia-oss-bootstrap-runner 2>/dev/null || true

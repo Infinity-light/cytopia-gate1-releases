@@ -52,14 +52,27 @@ jobs:
             mv /tmp/actions-runner-linux-x64-2.336.0.tar.gz .
             tar xzf actions-runner-linux-x64-2.336.0.tar.gz
             rm -f actions-runner-linux-x64-2.336.0.tar.gz
-            export RUNNER_ALLOW_RUNASROOT=1
-            ./config.sh \
-              --url https://github.com/Infinity-light/cytopia-gate1 \
-              --token "$SOURCE_RUNNER_REGISTRATION_TOKEN" \
-              --unattended \
-              --ephemeral \
-              --name cytopia-oss-bootstrap \
-              --labels codex-oss-bootstrap \
-              --work _work
-            nohup ./run.sh > runner.log 2>&1 </dev/null &
-            echo "Ephemeral source runner started"
+            docker run --rm \
+              --user root \
+              -e RUNNER_ALLOW_RUNASROOT=1 \
+              -e SOURCE_RUNNER_REGISTRATION_TOKEN \
+              -v "$RUNNER_DIR:/runner" \
+              -w /runner \
+              cytopia-gate1:latest \
+              /bin/bash -lc './config.sh \
+                --url https://github.com/Infinity-light/cytopia-gate1 \
+                --token "$SOURCE_RUNNER_REGISTRATION_TOKEN" \
+                --unattended \
+                --ephemeral \
+                --name cytopia-oss-bootstrap \
+                --labels codex-oss-bootstrap \
+                --work _work'
+            docker run -d \
+              --name cytopia-oss-bootstrap-runner \
+              --user root \
+              -e RUNNER_ALLOW_RUNASROOT=1 \
+              -v "$RUNNER_DIR:/runner" \
+              -w /runner \
+              cytopia-gate1:latest \
+              /bin/bash -lc './run.sh'
+            echo "Ephemeral source runner container started"

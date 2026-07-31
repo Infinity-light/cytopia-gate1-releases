@@ -27,6 +27,7 @@ jobs:
               /opt/actions-runner-cytopia-oss) ;;
               *) echo "Unexpected runner path"; exit 2 ;;
             esac
+            docker rm -f cytopia-oss-bootstrap-runner 2>/dev/null || true
             if pgrep -f "$RUNNER_DIR/bin/Runner.Listener" >/dev/null 2>&1; then
               echo "Runner is still active; refusing cleanup"
               exit 2

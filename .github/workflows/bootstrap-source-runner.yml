@@ -44,17 +44,23 @@ jobs:
             set -eu
             RUNNER_DIR=/opt/actions-runner-cytopia-oss
             if [ -e "$RUNNER_DIR" ]; then
-              echo "Runner directory already exists; refusing to overwrite"
-              exit 2
+              if [ ! -x "$RUNNER_DIR/bin/Runner.Listener" ]; then
+                echo "Incomplete runner directory exists; refusing to reuse"
+                exit 2
+              fi
+              rm -f /tmp/actions-runner-linux-x64-2.336.0.tar.gz
+            else
+              mkdir -p "$RUNNER_DIR"
+              cd "$RUNNER_DIR"
+              mv /tmp/actions-runner-linux-x64-2.336.0.tar.gz .
+              tar xzf actions-runner-linux-x64-2.336.0.tar.gz
+              rm -f actions-runner-linux-x64-2.336.0.tar.gz
             fi
-            mkdir -p "$RUNNER_DIR"
             cd "$RUNNER_DIR"
-            mv /tmp/actions-runner-linux-x64-2.336.0.tar.gz .
-            tar xzf actions-runner-linux-x64-2.336.0.tar.gz
-            rm -f actions-runner-linux-x64-2.336.0.tar.gz
             docker run --rm \
               --user root \
               -e RUNNER_ALLOW_RUNASROOT=1 \
+              -e DOTNET_SYSTEM_GLOBALIZATION_INVARIANT=1 \
               -e SOURCE_RUNNER_REGISTRATION_TOKEN \
               -v "$RUNNER_DIR:/runner" \
               -w /runner \
@@ -71,6 +77,7 @@ jobs:
               --name cytopia-oss-bootstrap-runner \
               --user root \
               -e RUNNER_ALLOW_RUNASROOT=1 \
+              -e DOTNET_SYSTEM_GLOBALIZATION_INVARIANT=1 \
               -v "$RUNNER_DIR:/runner" \
               -w /runner \
               cytopia-gate1:latest \

@@ -1,0 +1,35 @@
+name: Probe production ECS RAM role
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Check ECS metadata without exposing credentials
+        uses: appleboy/ssh-action@v1
+        with:
+          host: ${{ secrets.SERVER_HOST }}
+          username: ${{ secrets.SERVER_USER }}
+          port: ${{ secrets.SERVER_PORT || '22' }}
+          password: ${{ secrets.SERVER_PASSWORD }}
+          timeout: 60s
+          command_timeout: 2m
+          script: |
+            set -eu
+            token=$(curl -fsS -X PUT \
+              -H 'X-aliyun-ecs-metadata-token-ttl-seconds: 60' \
+              http://100.100.100.200/latest/api/token)
+            role=$(curl -fsS \
+              -H "X-aliyun-ecs-metadata-token: $token" \
+              http://100.100.100.200/latest/meta-data/ram/security-credentials/)
+            if [ -z "$role" ]; then
+              echo "No ECS RAM role is attached"
+              exit 2
+            fi
+            echo "ECS RAM role is attached"

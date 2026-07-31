@@ -258,12 +258,12 @@ jobs:
             }
             trap rollback EXIT
             if docker inspect cytopia-gate1 >/dev/null 2>&1; then
-              docker rename cytopia-gate1 cytopia-gate1-previous
-              docker stop cytopia-gate1-previous
+              docker rename cytopia-gate1 cytopia-gate1-previous 2>/dev/null || true
+              docker stop cytopia-gate1-previous 2>/dev/null || true
             fi
             if docker inspect cytopia-runner >/dev/null 2>&1; then
-              docker rename cytopia-runner cytopia-runner-previous
-              docker stop cytopia-runner-previous
+              docker rename cytopia-runner cytopia-runner-previous 2>/dev/null || true
+              docker stop cytopia-runner-previous 2>/dev/null || true
             fi
             if [ -f "$APP/data/cytopia.sqlite3" ]; then
               cp "$APP/data/cytopia.sqlite3" "$APP/backups/cytopia-$(date +%Y%m%d-%H%M%S).sqlite3"

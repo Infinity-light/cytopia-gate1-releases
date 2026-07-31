@@ -57,29 +57,38 @@ jobs:
               rm -f actions-runner-linux-x64-2.336.0.tar.gz
             fi
             cd "$RUNNER_DIR"
-            docker run --rm \
-              --user root \
-              -e RUNNER_ALLOW_RUNASROOT=1 \
-              -e DOTNET_SYSTEM_GLOBALIZATION_INVARIANT=1 \
-              -e SOURCE_RUNNER_REGISTRATION_TOKEN \
-              -v "$RUNNER_DIR:/runner" \
-              -w /runner \
-              cytopia-gate1:latest \
-              /bin/bash -lc './config.sh \
-                --url https://github.com/Infinity-light/cytopia-gate1 \
-                --token "$SOURCE_RUNNER_REGISTRATION_TOKEN" \
-                --unattended \
-                --ephemeral \
-                --name cytopia-oss-bootstrap \
-                --labels codex-oss-bootstrap \
-                --work _work'
             docker run -d \
               --name cytopia-oss-bootstrap-runner \
               --user root \
               -e RUNNER_ALLOW_RUNASROOT=1 \
-              -e DOTNET_SYSTEM_GLOBALIZATION_INVARIANT=1 \
+              -e SOURCE_RUNNER_REGISTRATION_TOKEN \
               -v "$RUNNER_DIR:/runner" \
               -w /runner \
               cytopia-gate1:latest \
-              /bin/bash -lc './run.sh'
-            echo "Ephemeral source runner container started"
+              /bin/bash -lc '
+                sed -i "s|deb.debian.org|mirrors.aliyun.com|g" /etc/apt/sources.list.d/debian.sources
+                apt-get update
+                apt-get install -y --no-install-recommends libicu72
+                ./config.sh \
+                  --url https://github.com/Infinity-light/cytopia-gate1 \
+                  --token "$SOURCE_RUNNER_REGISTRATION_TOKEN" \
+                  --unattended \
+                  --ephemeral \
+                  --name cytopia-oss-bootstrap \
+                  --labels codex-oss-bootstrap \
+                  --work _work
+                exec ./run.sh'
+            for attempt in $(seq 1 30); do
+              if docker logs cytopia-oss-bootstrap-runner 2>&1 \
+                | grep -q 'Listening for Jobs'; then
+                echo "Ephemeral source runner container started"
+                exit 0
+              fi
+              if [ "$(docker inspect cytopia-oss-bootstrap-runner --format '{{.State.Running}}')" != true ]; then
+                docker logs cytopia-oss-bootstrap-runner
+                exit 1
+              fi
+              sleep 2
+            done
+            docker logs cytopia-oss-bootstrap-runner
+            exit 1

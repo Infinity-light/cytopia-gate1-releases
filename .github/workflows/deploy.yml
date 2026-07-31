@@ -201,6 +201,11 @@ jobs:
             mkdir -p "$APP/data/deployments" "$APP/data/runner" "$APP/uploads" "$APP/backups"
             chown -R 10001:10001 "$APP/data" "$APP/uploads"
             umask 077
+            storage_backend=local
+            if [ -n "$OSS_ENDPOINT" ] && [ -n "$OSS_BUCKET" ] && \
+               [ -n "$OSS_ACCESS_KEY_ID" ] && [ -n "$OSS_ACCESS_KEY_SECRET" ]; then
+              storage_backend=oss
+            fi
             {
               printf 'DEPLOYMENT_BASE_DOMAIN=%s\n' 'apps.summercamp.godpenai.com'
               printf 'DEPLOYMENT_DOMAIN_POOL=%s\n' "$STUDENT_DOMAIN_POOL"
@@ -209,7 +214,7 @@ jobs:
               printf 'AI_GATEWAY_API_KEY=%s\n' "$AI_GATEWAY_API_KEY"
               printf 'AI_GATEWAY_MODEL=%s\n' 'DeepSeek-V3.2'
               printf 'AI_GATEWAY_DAILY_LIMIT=%s\n' '100'
-              printf 'CYTOPIA_STORAGE_BACKEND=%s\n' 'oss'
+              printf 'CYTOPIA_STORAGE_BACKEND=%s\n' "$storage_backend"
               printf 'OSS_ENDPOINT=%s\n' "$OSS_ENDPOINT"
               printf 'OSS_BUCKET=%s\n' "$OSS_BUCKET"
               printf 'OSS_ACCESS_KEY_ID=%s\n' "$OSS_ACCESS_KEY_ID"
@@ -270,7 +275,9 @@ jobs:
             export CYTOPIA_IMAGE_TAG=candidate
             export APP_COMMIT_SHA="$SOURCE_SHA"
             docker compose up -d --no-build
-            docker compose exec -T cytopia-gate1 python scripts/migrate_uploads_to_oss.py
+            if [ "$CYTOPIA_STORAGE_BACKEND" = oss ]; then
+              docker compose exec -T cytopia-gate1 python scripts/migrate_uploads_to_oss.py
+            fi
             passed=0
             for route in /health /summercamp/ /apply/ /prework/ /api/showcase; do
               route_ok=0

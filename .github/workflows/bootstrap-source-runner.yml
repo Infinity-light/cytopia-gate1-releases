@@ -11,6 +11,23 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 8
     steps:
+      - name: Download runner on the GitHub-hosted machine
+        run: |
+          curl -fsSLO \
+            https://github.com/actions/runner/releases/download/v2.336.0/actions-runner-linux-x64-2.336.0.tar.gz
+
+      - name: Transfer runner archive
+        uses: appleboy/scp-action@v0.1.7
+        with:
+          host: ${{ secrets.SERVER_HOST }}
+          username: ${{ secrets.SERVER_USER }}
+          port: ${{ secrets.SERVER_PORT || '22' }}
+          password: ${{ secrets.SERVER_PASSWORD }}
+          timeout: 120s
+          command_timeout: 5m
+          source: actions-runner-linux-x64-2.336.0.tar.gz
+          target: /tmp
+
       - name: Start an ephemeral runner for the private source repository
         uses: appleboy/ssh-action@v1
         env:
@@ -32,8 +49,7 @@ jobs:
             fi
             mkdir -p "$RUNNER_DIR"
             cd "$RUNNER_DIR"
-            curl -fsSLO \
-              https://github.com/actions/runner/releases/download/v2.336.0/actions-runner-linux-x64-2.336.0.tar.gz
+            mv /tmp/actions-runner-linux-x64-2.336.0.tar.gz .
             tar xzf actions-runner-linux-x64-2.336.0.tar.gz
             rm -f actions-runner-linux-x64-2.336.0.tar.gz
             export RUNNER_ALLOW_RUNASROOT=1
@@ -47,4 +63,3 @@ jobs:
               --work _work
             nohup ./run.sh > runner.log 2>&1 </dev/null &
             echo "Ephemeral source runner started"
-

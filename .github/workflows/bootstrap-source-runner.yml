@@ -57,6 +57,7 @@ jobs:
               rm -f actions-runner-linux-x64-2.336.0.tar.gz
             fi
             cd "$RUNNER_DIR"
+            docker rm -f cytopia-oss-bootstrap-runner 2>/dev/null || true
             docker run -d \
               --name cytopia-oss-bootstrap-runner \
               --user root \
@@ -68,7 +69,7 @@ jobs:
               /bin/bash -lc '
                 sed -i "s|deb.debian.org|mirrors.aliyun.com|g" /etc/apt/sources.list.d/debian.sources
                 apt-get update
-                apt-get install -y --no-install-recommends libicu72
+                apt-get install -y --no-install-recommends libicu-dev
                 ./config.sh \
                   --url https://github.com/Infinity-light/cytopia-gate1 \
                   --token "$SOURCE_RUNNER_REGISTRATION_TOKEN" \

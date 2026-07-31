@@ -454,4 +454,5 @@ jobs:
         env:
           BASE_URL: https://summercamp.godpenai.com
           EXPECTED_COMMIT_SHA: ${{ env.SOURCE_SHA }}
+          EXPECTED_STORAGE_BACKEND: ${{ vars.OSS_ENDPOINT != '' && vars.OSS_BUCKET != '' && secrets.OSS_ACCESS_KEY_ID != '' && secrets.OSS_ACCESS_KEY_SECRET != '' && 'oss' || 'local' }}
         run: python scripts/production_e2e.py

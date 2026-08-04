@@ -70,8 +70,76 @@ jobs:
           pytest -q
           git diff --check
 
-      - name: Build control-plane image
-        run: docker build -t "cytopia-gate1:$SOURCE_SHA" .
+      - name: Build control-plane and runner images
+        run: |
+          docker build -t "cytopia-gate1:$SOURCE_SHA" .
+          docker build -f runner/Dockerfile -t "cytopia-runner:$SOURCE_SHA" .
+
+      - name: Full-stack runner smoke test with build-only dependency
+        run: |
+          set -euo pipefail
+          project_id=cccccccccccccccccccccccccccccccc
+          release_id=dddddddddddddddddddddddddddddddd
+          fixture="$RUNNER_TEMP/cytopia-runner-smoke"
+          network=cytopia-runner-smoke
+          cleanup() {
+            docker rm -f "cytopia-app-$release_id" cytopia-runner-smoke 2>/dev/null || true
+            docker image rm "cytopia-student:$release_id" 2>/dev/null || true
+            docker network rm "$network" 2>/dev/null || true
+          }
+          trap cleanup EXIT
+          mkdir -p "$fixture/releases/$release_id" "$fixture/state"
+          cat > "$fixture/releases/$release_id/package.json" <<'JSON'
+          {
+            "name": "cytopia-runner-smoke",
+            "version": "1.0.0",
+            "scripts": {
+              "build": "node build.js",
+              "start": "node server.js"
+            },
+            "devDependencies": {
+              "left-pad": "1.3.0"
+            }
+          }
+          JSON
+          cat > "$fixture/releases/$release_id/build.js" <<'JS'
+          const leftPad = require("left-pad");
+          if (leftPad("ok", 4, "0") !== "00ok") process.exit(1);
+          JS
+          cat > "$fixture/releases/$release_id/server.js" <<'JS'
+          require("http").createServer((request, response) => {
+            response.writeHead(request.url === "/health" ? 200 : 404);
+            response.end(request.url === "/health" ? "ok" : "not found");
+          }).listen(Number(process.env.PORT || 8080), "0.0.0.0");
+          JS
+          docker network create "$network"
+          docker run -d --name cytopia-runner-smoke -p 8021:8020 \
+            --network "$network" \
+            -v /var/run/docker.sock:/var/run/docker.sock \
+            -v "$fixture/releases:/deployments/releases" \
+            -v "$fixture/state:/state" \
+            -e DEPLOYMENT_RUNNER_TOKEN=smoke-token \
+            -e RUNTIME_NETWORK="$network" \
+            "cytopia-runner:$SOURCE_SHA"
+          for attempt in 1 2 3 4 5; do
+            curl -fsS http://127.0.0.1:8021/health >/dev/null && break
+            [ "$attempt" = 5 ] && { docker logs cytopia-runner-smoke; exit 1; }
+            sleep 2
+          done
+          response=$(curl -sS -X POST http://127.0.0.1:8021/v1/releases \
+            -w $'\n%{http_code}' \
+            -H 'Authorization: Bearer smoke-token' \
+            -H 'Content-Type: application/json' \
+            --data "{\"project_id\":\"$project_id\",\"release_id\":\"$release_id\",\"preset\":\"node\",\"database\":\"none\",\"entrypoint\":\"server.js\",\"healthcheck\":\"/health\"}")
+          status=${response##*$'\n'}
+          body=${response%$'\n'*}
+          echo "$body"
+          if [ "$status" -lt 200 ] || [ "$status" -ge 300 ]; then
+            docker logs cytopia-runner-smoke
+            exit 1
+          fi
+          docker exec cytopia-runner-smoke python -c \
+            "import httpx; response=httpx.get('http://cytopia-app-$release_id:8080/health'); assert response.status_code == 200"
 
       - name: Container smoke test with persistent mounts
         run: |
@@ -93,8 +161,8 @@ jobs:
           done
           docker rm -f cytopia-smoke
 
-      - name: Package image
-        run: docker save "cytopia-gate1:$SOURCE_SHA" | gzip > images.tar.gz
+      - name: Package images
+        run: docker save "cytopia-gate1:$SOURCE_SHA" "cytopia-runner:$SOURCE_SHA" | gzip > images.tar.gz
 
       - name: Transfer images and compose topology
         uses: appleboy/scp-action@v0.1.7
@@ -130,7 +198,7 @@ jobs:
           script: |
             set -eu
             APP=/opt/apps/cytopia-gate1
-            mkdir -p "$APP/data/deployments" "$APP/uploads" "$APP/backups"
+            mkdir -p "$APP/data/deployments" "$APP/data/runner" "$APP/uploads" "$APP/backups"
             chown -R 10001:10001 "$APP/data" "$APP/uploads"
             umask 077
             storage_backend=local
@@ -157,26 +225,45 @@ jobs:
             cp /tmp/docker-compose.yml "$APP/docker-compose.yml"
             rm -f /tmp/docker-compose.yml
             docker tag "cytopia-gate1:$SOURCE_SHA" cytopia-gate1:candidate
+            docker tag "cytopia-runner:$SOURCE_SHA" cytopia-runner:candidate
             touch "$APP/.env"
             chmod 600 "$APP/.env"
+            ensure_secret() {
+              key="$1"
+              if ! grep -q "^${key}=" "$APP/.env"; then
+                printf '%s=%s\n' "$key" "$(openssl rand -hex 32)" >> "$APP/.env"
+              fi
+            }
+            ensure_secret DEPLOYMENT_RUNNER_TOKEN
+            ensure_secret DEPLOYMENT_MYSQL_ROOT_PASSWORD
+            ensure_secret DEPLOYMENT_POSTGRES_PASSWORD
             grep -q '^PUBLIC_BASE_URL=' "$APP/.env" || printf '%s\n' 'PUBLIC_BASE_URL=https://summercamp.godpenai.com' >> "$APP/.env"
             grep -q '^COOKIE_SECURE=' "$APP/.env" || printf '%s\n' 'COOKIE_SECURE=true' >> "$APP/.env"
             docker rm -f cytopia-gate1-previous 2>/dev/null || true
-            docker rm -f cytopia-runner cytopia-runner-previous 2>/dev/null || true
+            docker rm -f cytopia-runner-previous 2>/dev/null || true
             deploy_complete=0
             rollback() {
               [ "$deploy_complete" = 1 ] && return
               echo "Deployment failed; restoring previous containers"
               docker rm -f cytopia-gate1 2>/dev/null || true
+              docker rm -f cytopia-runner 2>/dev/null || true
               if docker inspect cytopia-gate1-previous >/dev/null 2>&1; then
                 docker rename cytopia-gate1-previous cytopia-gate1
                 docker start cytopia-gate1
+              fi
+              if docker inspect cytopia-runner-previous >/dev/null 2>&1; then
+                docker rename cytopia-runner-previous cytopia-runner
+                docker start cytopia-runner
               fi
             }
             trap rollback EXIT
             if docker inspect cytopia-gate1 >/dev/null 2>&1; then
               docker rename cytopia-gate1 cytopia-gate1-previous 2>/dev/null || true
               docker stop cytopia-gate1-previous 2>/dev/null || true
+            fi
+            if docker inspect cytopia-runner >/dev/null 2>&1; then
+              docker rename cytopia-runner cytopia-runner-previous 2>/dev/null || true
+              docker stop cytopia-runner-previous 2>/dev/null || true
             fi
             if [ -f "$APP/data/cytopia.sqlite3" ]; then
               cp "$APP/data/cytopia.sqlite3" "$APP/backups/cytopia-$(date +%Y%m%d-%H%M%S).sqlite3"
@@ -187,7 +274,7 @@ jobs:
             set +a
             export CYTOPIA_IMAGE_TAG=candidate
             export APP_COMMIT_SHA="$SOURCE_SHA"
-            docker compose up -d --no-build --remove-orphans
+            docker compose up -d --no-build
             if [ "$CYTOPIA_STORAGE_BACKEND" = oss ]; then
               docker compose exec -T cytopia-gate1 python scripts/migrate_uploads_to_oss.py
             fi
@@ -234,7 +321,9 @@ jobs:
             deploy_complete=1
             trap - EXIT
             docker rm -f cytopia-gate1-previous 2>/dev/null || true
+            docker rm -f cytopia-runner-previous 2>/dev/null || true
             docker tag cytopia-gate1:candidate cytopia-gate1:latest
+            docker tag cytopia-runner:candidate cytopia-runner:latest
             find "$APP/backups" -type f -name 'cytopia-*.sqlite3' -mtime +14 -delete
             docker image prune -f
 

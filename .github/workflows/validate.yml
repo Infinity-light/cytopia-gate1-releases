@@ -1,0 +1,26 @@
+name: Validate static release workflow
+
+on:
+  pull_request:
+    paths:
+      - ".github/workflows/**"
+      - "scripts/validate_static_release.py"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  static-contract:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Validate YAML and static-only deployment contract
+        run: |
+          pip install "PyYAML>=6,<7"
+          python -m py_compile scripts/validate_static_release.py
+          python scripts/validate_static_release.py

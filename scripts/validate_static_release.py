@@ -28,6 +28,7 @@ def main() -> None:
         "DEPLOYMENT_" + "MYSQL_ROOT_PASSWORD",
         "DEPLOYMENT_" + "POSTGRES_PASSWORD",
         "Full-stack " + "runner smoke",
+        "docker inspect ",
     )
     for phrase in forbidden:
         if phrase in source:
@@ -39,6 +40,7 @@ def main() -> None:
         "static-cutover-$SOURCE_SHA.containers",
         "label=cytopia.release",
         "docker update --restart=no",
+        "docker container inspect",
         "docker compose up -d --no-build cytopia-gate1",
         "A student runtime container is still running",
         "Production E2E",

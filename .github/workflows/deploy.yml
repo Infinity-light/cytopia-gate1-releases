@@ -177,7 +177,7 @@ jobs:
             restore_previous() {
               current="$1"
               previous="${current}-previous"
-              if docker inspect "$previous" >/dev/null 2>&1; then
+              if docker container inspect "$previous" >/dev/null 2>&1; then
                 docker rm -f "$current" 2>/dev/null || true
                 docker rename "$previous" "$current"
                 docker update --restart=unless-stopped "$current" >/dev/null 2>&1 || true
@@ -193,7 +193,7 @@ jobs:
               restore_previous cytopia-postgres
               restore_previous cytopia-mysql
               for container in $student_containers; do
-                if docker inspect "$container" >/dev/null 2>&1; then
+                if docker container inspect "$container" >/dev/null 2>&1; then
                   docker update --restart=unless-stopped "$container" >/dev/null 2>&1 || true
                   docker start "$container" >/dev/null
                 fi
@@ -201,7 +201,7 @@ jobs:
             }
             trap rollback EXIT
             for current in cytopia-gate1 cytopia-runner cytopia-postgres cytopia-mysql; do
-              if docker inspect "$current" >/dev/null 2>&1; then
+              if docker container inspect "$current" >/dev/null 2>&1; then
                 docker rename "$current" "${current}-previous"
                 docker update --restart=no "${current}-previous" >/dev/null 2>&1 || true
                 docker stop "${current}-previous" >/dev/null 2>&1 || true
@@ -249,7 +249,7 @@ jobs:
               exit 1
             fi
             rm -f /tmp/cytopia-disabled-site.json
-            initial_restarts=$(docker inspect cytopia-gate1 --format '{{.RestartCount}}')
+            initial_restarts=$(docker container inspect cytopia-gate1 --format '{{.RestartCount}}')
             if [ "$initial_restarts" != 0 ]; then
               echo "Container restarted during boot check: $initial_restarts"
               docker logs cytopia-gate1 --tail 100 || true
@@ -257,7 +257,7 @@ jobs:
             fi
             echo "Observing runtime stability for 60 seconds"
             sleep 60
-            stable_restarts=$(docker inspect cytopia-gate1 --format '{{.RestartCount}}')
+            stable_restarts=$(docker container inspect cytopia-gate1 --format '{{.RestartCount}}')
             stable_health=$(curl -sS http://127.0.0.1:8010/health || true)
             if [ "$stable_restarts" != 0 ] || ! printf '%s' "$stable_health" | grep -q '"status":"ok"'; then
               echo "Container failed stability check (restarts=$stable_restarts)"
